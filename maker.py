@@ -49,6 +49,7 @@ def run_app():
 
     # DB 초기화 및 마이그레이션
     def init_db():
+        # 기본 테이블 생성(없으면)
         c.execute("""CREATE TABLE IF NOT EXISTS users (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         name TEXT UNIQUE,
@@ -68,8 +69,8 @@ def run_app():
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         name TEXT,
                         cost INTEGER,
-                        description TEXT,
-                        stock INTEGER DEFAULT -1)""")  # stock: -1 = 무제한
+                        description TEXT
+                     )""")
 
         c.execute("""CREATE TABLE IF NOT EXISTS purchases (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -86,9 +87,17 @@ def run_app():
         except Exception as e:
             st.warning("users 테이블 마이그레이션 경고: " + str(e))
 
+        # rewards.stock 컬럼이 없으면 추가 (기존 DB에 컬럼이 없을 때 대비)
+        try:
+            if not has_column("rewards", "stock"):
+                c.execute("ALTER TABLE rewards ADD COLUMN stock INTEGER DEFAULT -1")
+                conn.commit()
+        except Exception as e:
+            st.warning("rewards 테이블에 stock 컬럼 추가 중 경고: " + str(e))
+
     init_db()
 
-    # 기본 보상 데이터(한 번만)
+    # 초기 보상 데이터(한 번만)
     def init_rewards():
         try:
             existing = c.execute("SELECT COUNT(*) FROM rewards").fetchone()[0]
@@ -98,6 +107,7 @@ def run_app():
                     ("간식권", 30, "작은 간식을 받을 수 있는 쿠폰", 10),
                     ("30분 자유시간", 60, "집중 해제 시간", 5),
                 ]
+                # INSERT 문은 컬럼 수가 변경되었을 수 있으니 컬럼명 명시
                 c.executemany("INSERT INTO rewards (name,cost,description,stock) VALUES (?,?,?,?)", items)
                 conn.commit()
         except Exception as e:
@@ -105,7 +115,7 @@ def run_app():
 
     init_rewards()
 
-    # 유틸 함수
+    # 유틸 함수들
     def get_user_by_name(name):
         return c.execute("SELECT id,name,points FROM users WHERE name=?", (name,)).fetchone()
 
@@ -140,8 +150,13 @@ def run_app():
 
     def update_reward(rid, name, cost, description, stock):
         try:
-            c.execute("UPDATE rewards SET name=?, cost=?, description=?, stock=? WHERE id=?",
-                      (name, cost, description, stock, rid))
+            # 컬럼이 존재하지 않을 가능성 대비: 만약 stock 컬럼이 없으면 stock 업데이트는 무시
+            if has_column("rewards", "stock"):
+                c.execute("UPDATE rewards SET name=?, cost=?, description=?, stock=? WHERE id=?",
+                          (name, cost, description, stock, rid))
+            else:
+                c.execute("UPDATE rewards SET name=?, cost=?, description=? WHERE id=?",
+                          (name, cost, description, rid))
             conn.commit()
             return True
         except Exception as e:
@@ -167,7 +182,7 @@ def run_app():
     if "_force_rerun" not in st.session_state:
         st.session_state["_force_rerun"] = False
 
-    # 사이드바: 모드 선택 + 보상 관리 탭
+    # 사이드바: 계정 + 보상 관리
     st.sidebar.markdown("## 계정")
     mode = st.sidebar.radio("모드 선택", ("로그인", "회원가입"))
 
@@ -204,7 +219,7 @@ def run_app():
                 else:
                     st.sidebar.error("등록된 사용자가 없습니다. 회원가입 해주세요.")
 
-    # 보상 관리(모든 사용자에게 보이지만 보통은 관리용)
+    # 보상 관리(사이드바)
     st.sidebar.markdown("---")
     st.sidebar.markdown("## 보상 관리 (직접 설정)")
     with st.sidebar.expander("새 보상 추가"):
@@ -221,8 +236,15 @@ def run_app():
                     st.sidebar.success("보상이 추가되었습니다.")
                     safe_rerun()
 
-    # 보상 목록 편집 (간단)
-    rewards_for_edit = c.execute("SELECT id,name,cost,description,stock FROM rewards ORDER BY id").fetchall()
+    # 보상 목록 편집 (사이드바)
+    try:
+        rewards_for_edit = c.execute("SELECT id,name,cost,description,stock FROM rewards ORDER BY id").fetchall()
+    except Exception:
+        # 만약 stock 컬럼이 없으면 stock 없이 가져오기
+        rewards_for_edit = c.execute("SELECT id,name,cost,description FROM rewards ORDER BY id").fetchall()
+        # 변환: 튜플 길이를 맞추기 위해 stock을 None으로 채움
+        rewards_for_edit = [r + (None,) if len(r) == 4 else r for r in rewards_for_edit]
+
     if rewards_for_edit:
         with st.sidebar.expander("보상 목록 수정/삭제"):
             for r in rewards_for_edit:
@@ -240,7 +262,7 @@ def run_app():
                         iname = st.text_input("이름", value=rname, key=f"iname_{rid}")
                         icost = st.number_input("포인트", min_value=0, value=rcost, key=f"icost_{rid}")
                         idesc = st.text_input("설명", value=rdesc, key=f"idesc_{rid}")
-                        istock = st.number_input("수량 (-1=무제한)", value=rstock, key=f"istock_{rid}")
+                        istock = st.number_input("수량 (-1=무제한)", value=(rstock if rstock is not None else -1), key=f"istock_{rid}")
                         submitted = st.form_submit_button("저장")
                         if submitted:
                             if update_reward(rid, iname.strip(), int(icost), idesc.strip(), int(istock)):
@@ -339,26 +361,30 @@ def run_app():
         with right:
             st.write("## 보상 샵 (구매하려면 클릭)")
             try:
-                rewards = c.execute("SELECT id,name,cost,description,stock FROM rewards ORDER BY id").fetchall()
+                # rewards 테이블에 stock 컬럼이 없을 수 있으니 안전하게 읽기
+                try:
+                    rewards = c.execute("SELECT id,name,cost,description,stock FROM rewards ORDER BY id").fetchall()
+                except Exception:
+                    rewards = c.execute("SELECT id,name,cost,description FROM rewards ORDER BY id").fetchall()
+                    rewards = [r + (None,) if len(r) == 4 else r for r in rewards]
             except Exception as e:
                 st.error("보상 불러오기 오류: " + str(e))
                 rewards = []
 
             for r in rewards:
                 rid, name_r, cost, desc, stock = r
+                stock_text = "무제한" if stock == -1 else ("재고: 없음" if stock == 0 else f"{stock}개")
                 rcols = st.columns([4,1])
-                stock_text = "무제한" if stock == -1 else f"{stock}개"
-                rcols[0].write(f"**{name_r}** - {cost}점  \n{desc}  \n재고: {stock_text}")
+                rcols[0].write(f"**{name_r}** - {cost}점  \n{desc}  \n{stock_text}")
                 if rcols[1].button("구매", key=f"buy_{rid}"):
                     try:
                         points_now = c.execute("SELECT points FROM users WHERE id=?", (user["id"],)).fetchone()[0]
                         if points_now >= cost:
-                            # 재고 체크
-                            if stock == -1 or stock > 0:
+                            if stock is None or stock == -1 or stock > 0:
                                 c.execute("UPDATE users SET points = points - ? WHERE id=?", (cost, user["id"]))
                                 c.execute("INSERT INTO purchases (user_id,reward_id,purchased_at) VALUES (?,?,?)",
                                           (user["id"], rid, datetime.now().isoformat()))
-                                if stock > 0:
+                                if stock is not None and stock > 0:
                                     c.execute("UPDATE rewards SET stock = stock - 1 WHERE id=?", (rid,))
                                 conn.commit()
                                 st.success(f"{name_r}을(를) 구매했습니다.")
@@ -385,10 +411,6 @@ def run_app():
                     st.write(f"- {h[1]} — {h[2]}")
             else:
                 st.info("구매 이력이 없습니다.")
-
-            st.markdown("---")
-            st.write("## 미션 추가 (사이드바에도 있음)")
-            # 사이드바에도 추가 폼 있으니 우측에 간단 안내만
 
         # 사이드바: 할일 추가 (로그인 시에만 보이게)
         st.sidebar.markdown("---")
