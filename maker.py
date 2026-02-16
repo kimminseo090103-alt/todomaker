@@ -5,12 +5,38 @@ from datetime import datetime
 import os
 import traceback
 import sys
+import time
 
-# ---------------- 설정 ----------------
+# ---------- 설정 ----------
 DB_FILENAME = "todo_points.db"
 DB_PATH = os.path.join(os.getcwd(), DB_FILENAME)
 
-# ---------------- 안전 래퍼: 예외를 화면에 표시 ----------------
+# ---------- 안전한 재실행 유틸 ----------
+def safe_rerun():
+    """
+    st.experimental_rerun()이 없는 환경에서도 페이지 갱신을 유도하는 함수.
+    우선 st.experimental_rerun을 시도하고, 없으면 쿼리 파라미터 변경으로 강제 리렌더링을 유도.
+    마지막 수단으로 세션 상태 토글을 사용.
+    """
+    try:
+        if hasattr(st, "experimental_rerun"):
+            # 일부 환경에서는 attribute가 있지만 호출 시 에러가 날 수 있으므로 try/except
+            try:
+                st.experimental_rerun()
+                return
+            except Exception:
+                pass
+        # 쿼리 파라미터를 변경하여 브라우저가 다시 로드되게 함
+        if hasattr(st, "experimental_set_query_params"):
+            st.experimental_set_query_params(_rerun=int(time.time() * 1000))
+            return
+    except Exception:
+        pass
+
+    # 최후 수단: 세션 상태 토글로 렌더링 유도
+    st.session_state["_force_rerun"] = not st.session_state.get("_force_rerun", False)
+
+# ---------- 앱 본문을 함수로 캡슐화 (예외 발생 시 화면에 표시) ----------
 def run_app():
     # DB 연결
     def get_conn(path=DB_PATH):
@@ -30,9 +56,8 @@ def run_app():
         col_names = [r[1] for r in cols]
         return column in col_names
 
-    # DB 초기화 및 간단 마이그레이션
+    # DB 초기화 및 마이그레이션(간단)
     def init_db():
-        # 기본 테이블 생성(없으면)
         c.execute("""CREATE TABLE IF NOT EXISTS users (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         name TEXT UNIQUE,
@@ -61,18 +86,18 @@ def run_app():
                         purchased_at TEXT)""")
         conn.commit()
 
-        # 마이그레이션: users 테이블에 created_at 컬럼이 없으면 추가
+        # users.created_at 컬럼이 없으면 추가 (ALTER TABLE)
         try:
             if not has_column("users", "created_at"):
                 c.execute("ALTER TABLE users ADD COLUMN created_at TEXT")
                 conn.commit()
         except Exception as e:
-            # 보통 한 번만 실행되므로 실패해도 경고만 표시
-            st.warning("users 테이블에 created_at 컬럼 추가 시 문제가 발생했습니다: " + str(e))
+            # 마이그레이션 실패 시 경고만 출력(개발 환경에선 DB 삭제 후 재생성 권장)
+            st.warning("users 테이블에 created_at 컬럼 추가 중 경고가 발생했습니다: " + str(e))
 
     init_db()
 
-    # 초기 보상 데이터 삽입(한 번만)
+    # 초기 보상 데이터(한 번만 삽입)
     def init_rewards():
         try:
             existing = c.execute("SELECT COUNT(*) FROM rewards").fetchone()[0]
@@ -119,6 +144,9 @@ def run_app():
     # 세션 초기화
     if "user" not in st.session_state:
         st.session_state.user = None
+    # 강제 rerun 토글 초기화(최후 수단)
+    if "_force_rerun" not in st.session_state:
+        st.session_state["_force_rerun"] = False
 
     # 사이드바: 모드 선택
     mode = st.sidebar.radio("모드 선택", ("로그인", "회원가입"))
@@ -131,14 +159,14 @@ def run_app():
             if not new_name or new_name.strip() == "":
                 st.sidebar.error("닉네임을 입력하세요.")
             else:
-                if get_user_by_name(new_name):
+                if get_user_by_name(new_name.strip()):
                     st.sidebar.error("이미 존재하는 닉네임입니다. 다른 닉네임을 입력하세요.")
                 else:
                     user_row = create_user(new_name.strip())
                     if user_row:
                         st.sidebar.success("회원가입이 완료되었습니다. 자동으로 로그인됩니다.")
                         st.session_state.user = {"id": user_row[0], "name": user_row[1], "points": user_row[2]}
-                        st.experimental_rerun()
+                        safe_rerun()
                     else:
                         st.sidebar.error("회원가입에 실패했습니다. 잠시 후 다시 시도하세요.")
 
@@ -154,7 +182,7 @@ def run_app():
                 if user_row:
                     st.session_state.user = {"id": user_row[0], "name": user_row[1], "points": user_row[2]}
                     st.sidebar.success(f"{name.strip()}님, 로그인 되었습니다.")
-                    st.experimental_rerun()
+                    safe_rerun()
                 else:
                     st.sidebar.error("등록된 사용자가 없습니다. 회원가입을 해주세요.")
 
@@ -186,7 +214,7 @@ def run_app():
                               (user["id"], title.strip(), reward, now))
                     conn.commit()
                     st.sidebar.success("할일이 추가되었습니다.")
-                    st.experimental_rerun()
+                    safe_rerun()
                 except Exception as e:
                     st.sidebar.error("할일 추가 중 오류가 발생했습니다: " + str(e))
 
@@ -213,7 +241,7 @@ def run_app():
                         update_user_points(user["id"], tpoints)
                         conn.commit()
                         st.success(f"{tpoints}점을 획득했습니다!")
-                        st.experimental_rerun()
+                        safe_rerun()
                     except Exception as e:
                         st.error("작업 완료 처리 중 오류가 발생했습니다: " + str(e))
 
@@ -238,7 +266,7 @@ def run_app():
                                   (user["id"], rid, datetime.now().isoformat()))
                         conn.commit()
                         st.success(f"{name_r}을(를) 구매했습니다.")
-                        st.experimental_rerun()
+                        safe_rerun()
                     else:
                         st.error("포인트가 부족합니다.")
                 except Exception as e:
@@ -260,20 +288,17 @@ def run_app():
         # 로그아웃
         if st.button("로그아웃"):
             st.session_state.user = None
-            st.experimental_rerun()
+            safe_rerun()
 
     else:
         st.info("왼쪽 사이드바에서 로그인 또는 회원가입을 해주세요.")
 
-
-# 안전하게 전체를 감싸서 예외 발생 시 브라우저에 표시
+# ---------- 안전 실행 래퍼 ----------
 if __name__ == "__main__":
     try:
         run_app()
     except Exception as e:
-        # 예외를 화면에 출력 (디버깅용)
         st.title("앱 실행 중 오류가 발생했습니다.")
         st.error(str(e))
         st.text(traceback.format_exc())
-        # 앱이 완전히 멈추지 않도록 종료
         sys.exit(1)
