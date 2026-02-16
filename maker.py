@@ -66,6 +66,8 @@ init_db()
 def init_rewards():
     existing = c.execute("SELECT COUNT(*) FROM rewards").fetchone()[0]
     if existing == 0:
-        items = [("5분 휴식권", 15, "짧은 휴식으로 재충전하세요"),]
-                 ("간식권", 30, "작은 간식 한 개"),
-                 ("30분 자유시간", 60, "집중 해제")
+        items = [
+    ("5분 휴식권", 15, "짧은 휴식으로 재충전하세요"),
+    ("간식권", 30, "작은 간식 한 개"),
+    ("30분 자유시간", 60, "집중 해제 시간"),
+        ]
